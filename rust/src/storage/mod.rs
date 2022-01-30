@@ -19,6 +19,7 @@ pub mod azure;
 pub mod file;
 #[cfg(any(feature = "gcs"))]
 pub mod gcs;
+pub mod localcache;
 #[cfg(any(feature = "s3", feature = "s3-rustls"))]
 pub mod s3;
 
@@ -546,7 +547,6 @@ pub trait StorageBackend: Send + Sync + Debug {
         Pin<Box<dyn Stream<Item = Result<ObjectMeta, StorageError>> + Send + 'a>>,
         StorageError,
     >;
-
     /// Create new object with `obj_bytes` as content.
     ///
     /// Implementation note:
