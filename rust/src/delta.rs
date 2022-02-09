@@ -1276,7 +1276,7 @@ impl DeltaTable {
         let table_uri = storage_backend.trim_path(table_uri);
         let log_uri_normalized = storage_backend.join_path(&table_uri, "_delta_log");
         Ok(Self {
-            version: 0,
+            version: -1,
             state: DeltaTableState::default(),
             storage: storage_backend,
             table_uri,

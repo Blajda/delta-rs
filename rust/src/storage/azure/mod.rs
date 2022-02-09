@@ -15,11 +15,17 @@ use azure_storage_blobs::prelude::*;
 use azure_storage_datalake::prelude::*;
 use futures::stream::Stream;
 use log::debug;
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::{fmt, pin::Pin};
+
+/// The Shared account key for the storage account
+pub const AZURE_STORAGE_ACCOUNT_KEY: &str = "AZURE_STORAGE_ACCOUNT_KEY";
+/// The Account name of the storage account
+pub const AZURE_STORAGE_ACCOUNT_NAME: &str = "AZURE_STORAGE_ACCOUNT_NAME";
 
 /// An object on an Azure Data Lake Storage Gen2 account.
 #[derive(Debug, PartialEq)]
@@ -63,13 +69,59 @@ impl AdlsGen2Backend {
     /// `AZURE_STORAGE_ACCOUNT_NAME` is required to be set in the environment.
     /// `AZURE_STORAGE_ACCOUNT_KEY` is required to be set in the environment.
     pub fn new(file_system_name: &str) -> Result<Self, StorageError> {
-        let storage_account_name = env::var("AZURE_STORAGE_ACCOUNT_NAME").map_err(|_| {
-            StorageError::AzureConfig("AZURE_STORAGE_ACCOUNT_NAME must be set".to_string())
-        })?;
+        let mut opts = HashMap::new();
 
-        let storage_account_key = env::var("AZURE_STORAGE_ACCOUNT_KEY").map_err(|_| {
-            StorageError::AzureConfig("AZURE_STORAGE_ACCOUNT_KEY must be set".to_string())
+        let storage_account_name = env::var(AZURE_STORAGE_ACCOUNT_NAME).map_err(|_| {
+            StorageError::AzureConfig(
+                stringify!(
+                    AZURE_STORAGE_ACCOUNT_NAME,
+                    " must be set in the environment"
+                )
+                .to_string(),
+            )
         })?;
+        opts.insert(
+            AZURE_STORAGE_ACCOUNT_NAME.to_string(),
+            storage_account_name,
+        );
+
+        let storage_account_key = env::var(AZURE_STORAGE_ACCOUNT_KEY).map_err(|_| {
+            StorageError::AzureConfig(
+                stringify!(AZURE_STORAGE_ACCOUNT_KEY, " must be set in the environment")
+                    .to_string(),
+            )
+        })?;
+        opts.insert(
+            AZURE_STORAGE_ACCOUNT_KEY.to_string(),
+            storage_account_key,
+        );
+
+        Self::new_from_options(file_system_name, opts)
+    }
+
+    /// Create a new [`AdlsGen2Backend`] from the given options
+    ///
+    /// Shared key authentication is used (temporarily).
+    ///
+    /// `AZURE_STORAGE_ACCOUNT_NAME` is required to be set.
+    /// `AZURE_STORAGE_ACCOUNT_KEY` is required to be set.
+    pub fn new_from_options(
+        file_system_name: &str,
+        options: HashMap<String, String>,
+    ) -> Result<Self, StorageError> {
+        let storage_account_name =
+            options
+                .get(AZURE_STORAGE_ACCOUNT_NAME)
+                .ok_or_else(|| StorageError::AzureConfig(
+                    stringify!(AZURE_STORAGE_ACCOUNT_NAME, " must be set").to_string(),
+                ))?;
+
+        let storage_account_key =
+            options
+                .get(AZURE_STORAGE_ACCOUNT_KEY)
+                .ok_or_else(|| StorageError::AzureConfig(
+                    stringify!(AZURE_STORAGE_ACCOUNT_KEY, " must be set").to_string(),
+                ))?;
 
         let data_lake_client = DataLakeClient::new(
             StorageSharedKeyCredential::new(
@@ -96,7 +148,7 @@ impl AdlsGen2Backend {
         let container_client = storage_client.as_container_client(file_system_name.to_owned());
 
         Ok(Self {
-            storage_account_name,
+            storage_account_name: storage_account_name.to_owned(),
             file_system_name: file_system_name.to_owned(),
             file_system_client,
             container_client,

@@ -19,6 +19,7 @@ pub mod azure;
 pub mod file;
 #[cfg(any(feature = "gcs"))]
 pub mod gcs;
+pub mod localcache;
 #[cfg(any(feature = "s3", feature = "s3-rustls"))]
 pub mod s3;
 
@@ -546,7 +547,6 @@ pub trait StorageBackend: Send + Sync + Debug {
         Pin<Box<dyn Stream<Item = Result<ObjectMeta, StorageError>> + Send + 'a>>,
         StorageError,
     >;
-
     /// Create new object with `obj_bytes` as content.
     ///
     /// Implementation note:
@@ -611,6 +611,11 @@ pub fn get_backend_for_uri_with_options(
         #[cfg(any(feature = "s3", feature = "s3-rustls"))]
         Uri::S3Object(_) => Ok(Box::new(s3::S3StorageBackend::new_from_options(
             S3StorageOptions::from_map(_options),
+        )?)),
+        #[cfg(feature = "azure")]
+        Uri::AdlsGen2Object(obj) => Ok(Box::new(azure::AdlsGen2Backend::new_from_options(
+            obj.file_system,
+            _options,
         )?)),
         _ => get_backend_for_uri(uri),
     }
