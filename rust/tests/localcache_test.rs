@@ -20,7 +20,7 @@ mod localcache {
         let cache_storage =
             LocalCacheStorageBackend::new(local, local_uri, Box::new(remote), remote_uri);
 
-        let table = DeltaTableBuilder::from_uri(remote_uri)
+        let table = DeltaTableBuilder::from_uri(local_uri)
             .unwrap()
             .with_storage_backend(Box::new(cache_storage))
             .load()
@@ -72,7 +72,7 @@ mod localcache {
             .write(b"{\"version\":5,\"size\":13}")
             .unwrap();
 
-        let table = DeltaTableBuilder::from_uri(remote_uri)
+        let table = DeltaTableBuilder::from_uri(local_uri)
             .unwrap()
             .with_storage_backend(Box::new(cache_storage))
             .load()
