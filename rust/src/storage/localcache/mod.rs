@@ -49,7 +49,11 @@ impl LocalCacheStorageBackend {
 
     /// Obtain the local, remote and realative paths
     pub fn get_paths(&self, path: &str) -> (String, String, String) {
-        let rel_path = path.to_owned().replace(&self.local_uri, "");
+        let mut rel_path = path.to_owned().replace(&self.local_uri, "");
+        if !rel_path.starts_with("/") {
+            rel_path = "/".to_string() + &rel_path;
+        }
+
         let remote_path = self.remote_uri.to_string() + &rel_path;
         let local_path = path;
 
