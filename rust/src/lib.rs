@@ -93,6 +93,7 @@ pub mod data_catalog;
 mod delta;
 pub mod delta_arrow;
 pub mod delta_config;
+pub mod optimize;
 pub mod partitions;
 pub mod schema;
 pub mod storage;

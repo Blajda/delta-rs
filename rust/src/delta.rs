@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{cmp::max, cmp::Ordering, collections::HashSet};
 use uuid::Uuid;
 
-use crate::action::Stats;
+use crate::action::{Add, Stats};
 
 use super::action;
 use super::action::{Action, DeltaOperation};
@@ -566,7 +566,7 @@ pub struct DeltaTable {
     /// the load options used during load
     pub config: DeltaTableConfig,
 
-    state: DeltaTableState,
+    pub(crate) state: DeltaTableState,
 
     // metadata
     // application_transactions
@@ -957,12 +957,11 @@ impl DeltaTable {
         }
     }
 
-    /// Returns the file list tracked in current table state filtered by provided
-    /// `PartitionFilter`s.
-    pub fn get_files_by_partitions(
-        &self,
-        filters: &[PartitionFilter<&str>],
-    ) -> Result<Vec<String>, DeltaTableError> {
+    ///Obtain Add actions for files that match the filter
+    pub fn get_active_add_actions_by_partitions<'a>(
+        &'a self,
+        filters: &'a [PartitionFilter<'a, &'a str>],
+    ) -> Result<impl Iterator<Item = &'a Add> + '_, DeltaTableError> {
         let current_metadata = self
             .state
             .current_metadata()
@@ -981,20 +980,28 @@ impl DeltaTable {
             .into_iter()
             .collect();
 
+        let actions = self.state.files().iter().filter(move |add| {
+            let partitions = add
+                .partition_values
+                .iter()
+                .map(|p| DeltaTablePartition::from_partition_value(p, ""))
+                .collect::<Vec<DeltaTablePartition>>();
+            filters
+                .iter()
+                .all(|filter| filter.match_partitions(&partitions, &partition_col_data_types))
+        });
+        println!("{:?}", actions);
+        Ok(actions)
+    }
+
+    /// Returns the file list tracked in current table state filtered by provided
+    /// `PartitionFilter`s.
+    pub fn get_files_by_partitions(
+        &self,
+        filters: &[PartitionFilter<&str>],
+    ) -> Result<Vec<String>, DeltaTableError> {
         let files = self
-            .state
-            .files()
-            .iter()
-            .filter(|add| {
-                let partitions = add
-                    .partition_values
-                    .iter()
-                    .map(|p| DeltaTablePartition::from_partition_value(p, ""))
-                    .collect::<Vec<DeltaTablePartition>>();
-                filters
-                    .iter()
-                    .all(|filter| filter.match_partitions(&partitions, &partition_col_data_types))
-            })
+            .get_active_add_actions_by_partitions(filters)?
             .map(|add| add.path.clone())
             .collect();
 
@@ -1420,6 +1427,31 @@ impl Default for DeltaTransactionOptions {
     }
 }
 
+///Utility for to generate parquet filename
+pub fn generate_parquet_filename(
+    table: &DeltaTable,
+    partitions: Option<Vec<(String, String)>>,
+) -> String {
+    /*
+     * The specific file naming for parquet is not well documented including the preceding five
+     * zeros and the trailing c000 string
+     *
+     */
+    let mut path_parts = vec![];
+
+    if let Some(partitions) = partitions {
+        for partition in partitions {
+            path_parts.push(format!("{}={}", partition.0, partition.1));
+        }
+    }
+
+    path_parts.push(format!("part-00000-{}-c000.snappy.parquet", Uuid::new_v4()));
+
+    table
+        .storage
+        .join_paths(&path_parts.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+}
+
 /// Object representing a delta transaction.
 /// Clients that do not need to mutate action content in case a transaction conflict is encountered
 /// may use the `commit` method and rely on optimistic concurrency to determine the
@@ -1482,7 +1514,7 @@ impl<'a> DeltaTransaction<'a> {
             }
         }
 
-        let path = self.generate_parquet_filename(partitions);
+        let path = generate_parquet_filename(self.delta_table, partitions);
         let parquet_uri = self
             .delta_table
             .storage
@@ -1512,27 +1544,6 @@ impl<'a> DeltaTransaction<'a> {
         }));
 
         Ok(())
-    }
-
-    fn generate_parquet_filename(&self, partitions: Option<Vec<(String, String)>>) -> String {
-        /*
-         * The specific file naming for parquet is not well documented including the preceding five
-         * zeros and the trailing c000 string
-         *
-         */
-        let mut path_parts = vec![];
-
-        if let Some(partitions) = partitions {
-            for partition in partitions {
-                path_parts.push(format!("{}={}", partition.0, partition.1));
-            }
-        }
-
-        path_parts.push(format!("part-00000-{}-c000.snappy.parquet", Uuid::new_v4()));
-
-        self.delta_table
-            .storage
-            .join_paths(&path_parts.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
     }
 
     /// Commits the given actions to the delta log.
@@ -1740,19 +1751,13 @@ mod tests {
 
     #[tokio::test]
     async fn parquet_filename() {
-        let mut table = open_table("./tests/data/simple_table").await.unwrap();
-
-        let txn = DeltaTransaction {
-            delta_table: &mut table,
-            actions: vec![],
-            options: DeltaTransactionOptions::default(),
-        };
+        let table = open_table("./tests/data/simple_table").await.unwrap();
 
         let partitions = vec![
             (String::from("col1"), String::from("a")),
             (String::from("col2"), String::from("b")),
         ];
-        let parquet_filename = txn.generate_parquet_filename(Some(partitions));
+        let parquet_filename = generate_parquet_filename(&table, Some(partitions));
         if cfg!(windows) {
             assert!(parquet_filename.contains("col1=a\\col2=b\\part-00000-"));
         } else {
