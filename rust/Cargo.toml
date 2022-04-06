@@ -94,3 +94,4 @@ pretty_assertions = "0"
 tempdir = "0"
 maplit = { version = "1" }
 anyhow = "1"
+fs_extra = "1.2.0"
