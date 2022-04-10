@@ -551,7 +551,7 @@ impl DeltaTableBuilder {
 ///
 #[derive(Debug)]
 pub enum PeekCommit {
-    /// The next commit version and assoicated actions
+    /// The next commit version and associated actions
     New(DeltaDataTypeVersion, Vec<Action>),
     /// Provided DeltaVersion is up to date
     UpToDate,
@@ -1185,7 +1185,8 @@ impl DeltaTable {
         let valid_files = self.get_file_set();
 
         let mut files_to_delete = vec![];
-        let mut all_files = self.storage.list_objs(&self.table_uri).await?;
+        let uri = self.table_uri.trim_end_matches("/").to_string() + "/";
+        let mut all_files = self.storage.list_objs(&uri).await?;
 
         while let Some(obj_meta) = all_files.next().await {
             let obj_meta = obj_meta?;
@@ -1300,6 +1301,7 @@ impl DeltaTable {
         metadata: DeltaTableMetaData,
         protocol: action::Protocol,
         commit_info: Option<Map<String, Value>>,
+        add_actions: Option<Vec<action::Add>>,
     ) -> Result<(), DeltaTableError> {
         let meta = action::MetaData::try_from(metadata)?;
 
@@ -1314,11 +1316,16 @@ impl DeltaTable {
             Value::Number(serde_json::Number::from(Utc::now().timestamp_millis())),
         );
 
-        let actions = vec![
+        let mut actions = vec![
             Action::commitInfo(enriched_commit_info),
             Action::protocol(protocol),
             Action::metaData(meta),
         ];
+        if let Some(add_actions) = add_actions {
+            for add_action in add_actions {
+                actions.push(Action::add(add_action));
+            }
+        };
 
         let mut transaction = self.create_transaction(None);
         transaction.add_actions(actions.clone());
@@ -1817,7 +1824,7 @@ mod tests {
             serde_json::Value::String("test user".to_string()),
         );
         // Action
-        dt.create(delta_md.clone(), protocol.clone(), Some(commit_info))
+        dt.create(delta_md.clone(), protocol.clone(), Some(commit_info), None)
             .await
             .unwrap();
 
