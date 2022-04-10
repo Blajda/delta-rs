@@ -7,11 +7,6 @@ DeltaTable
 .. automodule:: deltalake.table
     :members:
 
-Writing DeltaTables
--------------------
-
-.. autofunction:: deltalake.write_deltalake
-
 DeltaSchema
 -----------
 

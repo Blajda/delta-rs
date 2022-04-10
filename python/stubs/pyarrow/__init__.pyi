@@ -2,7 +2,6 @@ from typing import Any, Callable
 
 Schema: Any
 Table: Any
-RecordBatch: Any
 Field: Any
 DataType: Any
 schema: Any
