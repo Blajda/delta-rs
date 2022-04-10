@@ -1185,7 +1185,8 @@ impl DeltaTable {
         let valid_files = self.get_file_set();
 
         let mut files_to_delete = vec![];
-        let mut all_files = self.storage.list_objs(&self.table_uri).await?;
+        let uri = self.table_uri.trim_end_matches("/").to_string() + "/";
+        let mut all_files = self.storage.list_objs(&uri).await?;
 
         while let Some(obj_meta) = all_files.next().await {
             let obj_meta = obj_meta?;
