@@ -11,7 +11,6 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use log::debug;
 use std::collections::HashMap;
-use std::env;
 use std::error::Error;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -20,10 +19,83 @@ use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::task::LocalPoolHandle;
 
-///The ADLS Gen2 Access Key
-pub const AZURE_STORAGE_ACCOUNT_KEY: &str = "AZURE_STORAGE_ACCOUNT_KEY";
-///The name of storage account
-pub const AZURE_STORAGE_ACCOUNT_NAME: &str = "AZURE_STORAGE_ACCOUNT_NAME";
+pub mod azure_storage_options {
+
+    ///The name of storage account
+    pub const AZURE_STORAGE_ACCOUNT_NAME: &str = "AZURE_STORAGE_ACCOUNT_NAME";
+    ///The name of the container container/filesystem
+    pub const AZURE_STORAGE_FILE_SYSTEM_NAME: &str = "AZURE_STORAGE_FILE_SYSTEM_NAME";
+    ///How to authentication with Azure
+    pub const AZURE_STORAGE_AUTH_TYPE: &str = "AZURE_STORAGE_AUTH_TYPE";
+    ///The ADLS Gen2 Access Key
+    pub const AZURE_STORAGE_ACCOUNT_KEY: &str = "AZURE_STORAGE_ACCOUNT_KEY";
+
+    ///Use shared key for authentication
+    pub const AZURE_SHARED_KEY: &str = "SHARED_KEY";
+    ///Use managed identity for authentication
+    pub const AZURE_MANAGED_IDENTITY: &str = "MANAGED_IDENTITY";
+
+    pub const AZURE_OPTS: &[&str] = &[
+        AZURE_STORAGE_ACCOUNT_NAME,
+        AZURE_STORAGE_FILE_SYSTEM_NAME,
+        AZURE_STORAGE_AUTH_TYPE,
+        AZURE_STORAGE_ACCOUNT_KEY,
+    ];
+}
+
+#[derive(Clone, Debug, PartialEq)]
+
+pub enum AzureStorageType {
+    SharedKey,
+    ManagedIdentity,
+}
+pub struct AzureStorageOptions {
+    storage_account_name: Option<String>,
+    storage_filesystem_name: Option<String>,
+    storage_auth_type: Option<AzureStorageType>,
+    storage_account_key: Option<String>,
+    extra_opts: HashMap<String, String>,
+}
+
+impl AzureStorageOptions {
+    pub fn from_map(map: HashMap<String, String>) -> Self {
+        use azure_storage_options::*;
+
+        let extra_opts = map
+            .iter()
+            .filter(|(k, _)| !azure_storage_options::AZURE_OPTS.contains(&k.as_str()))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+
+        Self {
+            storage_account_name: Self::str_option(&map, AZURE_STORAGE_ACCOUNT_NAME),
+            storage_filesystem_name: Self::str_option(&map, AZURE_STORAGE_FILE_SYSTEM_NAME),
+            storage_auth_type: Self::auth_option(&map, AZURE_STORAGE_AUTH_TYPE),
+            storage_account_key: Self::str_option(&map, AZURE_STORAGE_ACCOUNT_KEY),
+            extra_opts,
+        }
+    }
+
+    fn str_option(map: &HashMap<String, String>, key: &str) -> Option<String> {
+        map.get(key)
+            .map_or_else(|| std::env::var(key).ok(), |v| Some(v.to_owned()))
+    }
+
+    fn auth_option(map: &HashMap<String, String>, key: &str) -> Option<AzureStorageType> {
+        use AzureStorageType::*;
+        use azure_storage_options::*;
+
+        let maybe_str = map
+            .get(key)
+            .map_or_else(|| std::env::var(key).ok(), |v| Some(v.to_owned()));
+
+        match s {
+            Some(AZURE_SHARED_KEY) => Some(SharedKey),
+            Some(AZURE_MANAGED_IDENTITY) => Some(ManagedIdentity),
+            _ => None,
+        }
+    }
+}
 
 /// An object on an Azure Data Lake Storage Gen2 account.
 #[derive(Debug, PartialEq)]
@@ -71,19 +143,14 @@ impl AdlsGen2Backend {
     ///
     pub fn new(file_system_name: &str) -> Result<Self, StorageError> {
         let mut map: HashMap<String, String> = HashMap::new();
+        map.insert(
+            azure_storage_options::AZURE_STORAGE_FILE_SYSTEM_NAME.to_string(),
+            file_system_name.to_string(),
+        );
 
-        let storage_account_name = env::var(AZURE_STORAGE_ACCOUNT_NAME).map_err(|_| {
-            StorageError::AzureConfig("AZURE_STORAGE_ACCOUNT_NAME must be set".to_string())
-        })?;
+        let opts = AzureStorageOptions::from_map(map);
 
-        let storage_account_key = env::var(AZURE_STORAGE_ACCOUNT_KEY).map_err(|_| {
-            StorageError::AzureConfig("AZURE_STORAGE_ACCOUNT_KEY must be set".to_string())
-        })?;
-
-        map.insert(AZURE_STORAGE_ACCOUNT_NAME.to_string(), storage_account_name);
-        map.insert(AZURE_STORAGE_ACCOUNT_KEY.to_string(), storage_account_key);
-
-        Self::from_map(file_system_name, map)
+        Self::new_from_options(opts)
     }
 
     /// Create a new [`AdlsGen2Backend`] using a [`TokenCredential`]
@@ -145,19 +212,60 @@ impl AdlsGen2Backend {
     /// `AZURE_STORAGE_ACCOUNT_NAME`
     /// `AZURE_STORAGE_ACCOUNT_KEY`
     ///
-    pub fn from_map(
-        file_system_name: &str,
-        map: HashMap<String, String>,
-    ) -> Result<Self, StorageError> {
-        let storage_account_name = map.get(AZURE_STORAGE_ACCOUNT_NAME).ok_or_else(|| {
-            StorageError::AzureConfig("AZURE_STORAGE_ACCOUNT_NAME must be set".to_string())
+    pub fn new_from_options(options: AzureStorageOptions) -> Result<Self, StorageError> {
+        use azure_identity::token_credentials;
+        use azure_storage_options::*;
+
+        let storage_account_name = options.storage_account_name.ok_or_else(|| {
+            StorageError::AzureConfig(format!("{} must be set", AZURE_STORAGE_ACCOUNT_NAME))
         })?;
 
-        let storage_account_key = map.get(AZURE_STORAGE_ACCOUNT_KEY).ok_or_else(|| {
-            StorageError::AzureConfig("AZURE_STORAGE_ACCOUNT_KEY must be set".to_string())
+        let file_system_name = options.storage_filesystem_name.ok_or_else(|| {
+            StorageError::AzureConfig(format!("{} must be set", AZURE_STORAGE_FILE_SYSTEM_NAME))
         })?;
 
-        Self::new_with_shared_key(storage_account_name, file_system_name, storage_account_key)
+        // For backwards compatability, check if shared key is set but authentication type is not.
+        // authentication type was not required in the past
+        // TODO: Write a test for that?
+        if (options.storage_auth_type.is_none() && options.storage_account_key.is_some())
+            || (options.storage_auth_type == Some(AzureStorageType::SharedKey))
+        {
+            let storage_account_key = options.storage_account_key.ok_or_else(|| {
+                StorageError::AzureConfig(format!("{} must be set", AZURE_STORAGE_ACCOUNT_KEY))
+            })?;
+
+            Self::new_with_shared_key(
+                &storage_account_name,
+                &file_system_name,
+                &storage_account_key,
+            )
+        } else if options.storage_auth_type.is_some() {
+            let auth_type = options.storage_auth_type.unwrap();
+            let token = match auth_type {
+                AzureStorageType::ManagedIdentity => {
+                    Arc::new(token_credentials::AzureCliCredential)
+                }
+                AzureStorageType::SharedKey => {
+                    panic!("Token credential cannot be used for shared keys")
+                }
+            };
+            let token = token_credentials::AutoRefreshingTokenCredential::new(token);
+
+            Self::new_with_token_credential(
+                &storage_account_name,
+                &file_system_name,
+                Arc::new(token),
+            )
+        } else {
+            let token =
+                Arc::new(token_credentials::DefaultAzureCredentialBuilder::default().build());
+            let token = token_credentials::AutoRefreshingTokenCredential::new(token);
+            Self::new_with_token_credential(
+                &storage_account_name,
+                &file_system_name,
+                Arc::new(token),
+            )
+        }
     }
 
     fn validate_container<'a>(&self, obj: &AdlsGen2Object<'a>) -> Result<(), StorageError> {
@@ -201,7 +309,7 @@ fn to_storage_err2(err: azure_storage::core::Error) -> StorageError {
 }
 
 // TODO: This implementation exists since Azure's Pageable is !Send.
-// When this is resolved in the Azure crates, fix this up too
+// When this is resolved in the Azure crates, fix this up
 async fn list_obj_future(
     client: FileSystemClient,
     path: String,

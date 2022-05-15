@@ -605,7 +605,7 @@ pub fn get_backend_for_uri(uri: &str) -> Result<Box<dyn StorageBackend>, Storage
 pub fn get_backend_for_uri_with_options(
     uri: &str,
     // NOTE: prefixing options with "_" to avoid deny warnings error since usage is conditional on s3 and the only usage is with s3 so far
-    _options: std::collections::HashMap<String, String>,
+    mut _options: std::collections::HashMap<String, String>,
 ) -> Result<Box<dyn StorageBackend>, StorageError> {
     match parse_uri(uri)? {
         #[cfg(any(feature = "s3", feature = "s3-rustls"))]
@@ -613,10 +613,15 @@ pub fn get_backend_for_uri_with_options(
             S3StorageOptions::from_map(_options),
         )?)),
         #[cfg(feature = "azure")]
-        Uri::AdlsGen2Object(obj) => Ok(Box::new(azure::AdlsGen2Backend::from_map(
-            obj.file_system,
-            _options,
-        )?)),
+        Uri::AdlsGen2Object(obj) => {
+            _options
+                .entry(azure::azure_storage_options::AZURE_STORAGE_FILE_SYSTEM_NAME.to_string())
+                .or_insert(obj.file_system.to_string());
+
+            Ok(Box::new(azure::AdlsGen2Backend::new_from_options(
+                azure::AzureStorageOptions::from_map(_options),
+            )?))
+        }
         _ => get_backend_for_uri(uri),
     }
 }
