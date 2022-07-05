@@ -7,7 +7,7 @@ mod optimize {
         datatypes::{DataType, Field},
         record_batch::RecordBatch,
     };
-    use deltalake::optimize::{MetricDetails, Metrics};
+    use deltalake::optimize::{MetricDetails, Metrics, MetricsDeltaLog};
     use deltalake::writer::DeltaWriterError;
     use deltalake::{
         action,
@@ -490,9 +490,9 @@ mod optimize {
         let last_commit = &commit_info[commit_info.len() - 1];
 
         let commit_metrics =
-            serde_json::from_value::<Metrics>(last_commit["operationMetrics"].clone())?;
+            serde_json::from_value::<MetricsDeltaLog>(last_commit["operationMetrics"].clone())?;
 
-        assert_eq!(commit_metrics, metrics);
+        assert_eq!(commit_metrics, MetricsDeltaLog::from_metrics(&metrics));
         assert_eq!(last_commit["readVersion"], json!(version));
         assert_eq!(
             last_commit["operationParameters"]["targetSize"],

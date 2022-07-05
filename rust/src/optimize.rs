@@ -42,23 +42,70 @@ use serde_json::Map;
 #[serde(rename_all = "camelCase")]
 pub struct Metrics {
     /// Number of optimized files added
-    pub num_files_added: u64,
+    pub num_files_added: DeltaDataTypeLong,
     /// Number of unoptimized files removed
-    pub num_files_removed: u64,
+    pub num_files_removed: DeltaDataTypeLong,
     /// Detailed metrics for the add operation
     pub files_added: MetricDetails,
     /// Detailed metrics for the remove operation
     pub files_removed: MetricDetails,
     /// Number of partitions that had at least one file optimized
-    pub partitions_optimized: u64,
+    pub partitions_optimized: DeltaDataTypeLong,
     /// TODO: The number of batches written
-    pub num_batches: u64,
+    pub num_batches: DeltaDataTypeLong,
     /// How many files were considered during optimization. Not every file considered is optimized
     pub total_considered_files: usize,
     /// How many files were considered for optimization but were skipped
     pub total_files_skipped: usize,
     /// The order of records from source files is preserved
     pub preserve_insertion_order: bool,
+    /// 25th percentile of files added
+    pub p25_file_size: DeltaDataTypeLong,
+    /// 50th percentile of files added
+    pub p50_file_size: DeltaDataTypeLong,
+    /// 75th percentile of files added
+    pub p75_file_size: DeltaDataTypeLong,
+}
+
+/// Metrics that are committed to the delta log
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricsDeltaLog {
+    /// How many files were removed
+    pub num_removed_files: DeltaDataTypeLong,
+    /// How many bytes were removed
+    pub num_removed_bytes: DeltaDataTypeLong,
+    /// How many files were added
+    pub num_added_files: DeltaDataTypeLong,
+    /// Total sum of files added
+    pub num_added_bytes: DeltaDataTypeLong,
+    /// minimum file size added (p0)
+    pub min_file_size: DeltaDataTypeLong,
+    /// 25th percentile of files added
+    pub p25_file_size: DeltaDataTypeLong,
+    /// 50th percentile of files added
+    pub p50_file_size: DeltaDataTypeLong,
+    /// 75th percentile of files added
+    pub p75_file_size: DeltaDataTypeLong,
+    /// max file size added (p100)
+    pub max_file_size: DeltaDataTypeLong,
+}
+
+impl MetricsDeltaLog {
+    /// Convert detailed optimize metrics to a summary
+    pub fn from_metrics(metrics: &Metrics) -> Self {
+        MetricsDeltaLog {
+            num_removed_files: metrics.files_removed.total_files,
+            num_removed_bytes: metrics.files_removed.total_size,
+            num_added_files: metrics.files_added.total_files,
+            num_added_bytes: metrics.files_added.total_size,
+            min_file_size: metrics.files_added.min,
+            p25_file_size: metrics.p25_file_size,
+            p50_file_size: metrics.p50_file_size,
+            p75_file_size: metrics.p75_file_size,
+            max_file_size: metrics.files_added.max,
+        }
+    }
 }
 
 /// Statistics on files for a particular operation
@@ -73,7 +120,7 @@ pub struct MetricDetails {
     /// Average file size of a operation
     pub avg: f64,
     /// Number of files encountered during operation
-    pub total_files: usize,
+    pub total_files: DeltaDataTypeLong,
     /// Sum of file sizes of a operation
     pub total_size: DeltaDataTypeLong,
 }
@@ -203,6 +250,7 @@ impl MergePlan {
         // Read files into memory and write into memory. Once a file is complete write to underlying storage.
         let mut actions = vec![];
         let mut metrics = self.metrics;
+        let mut file_add_sizes = Vec::new();
 
         for (_partition_path, merge_partition) in self.operations.iter() {
             let partition_values = &merge_partition.partition_values;
@@ -252,18 +300,19 @@ impl MergePlan {
                 }
                 for mut add in add_actions {
                     add.data_change = false;
-                    let size = add.size;
+                    metrics.files_added.total_size += add.size;
 
-                    metrics.num_files_added += 1;
-                    metrics.files_added.total_files += 1;
-                    metrics.files_added.total_size += size;
-                    metrics.files_added.max = std::cmp::max(metrics.files_added.max, size);
-                    metrics.files_added.min = std::cmp::min(metrics.files_added.min, size);
+                    file_add_sizes.push(add.size);
                     actions.push(action::Action::add(add));
                 }
             }
+
             metrics.partitions_optimized += 1;
         }
+
+        let files_added = file_add_sizes.len();
+        metrics.files_added.total_files = files_added as i64;
+        metrics.num_files_added = files_added as i64;
 
         if metrics.num_files_added == 0 {
             metrics.files_added.min = 0;
@@ -272,6 +321,13 @@ impl MergePlan {
             metrics.files_removed.min = 0;
             metrics.files_removed.avg = 0.0;
         } else {
+            file_add_sizes.sort();
+            metrics.files_added.max = file_add_sizes[files_added - 1];
+            metrics.files_added.min = file_add_sizes[0];
+            metrics.p25_file_size = file_add_sizes[files_added / 4];
+            metrics.p50_file_size = file_add_sizes[files_added / 2];
+            metrics.p75_file_size = file_add_sizes[3 * files_added / 4];
+
             metrics.files_added.avg =
                 (metrics.files_added.total_size as f64) / (metrics.files_added.total_files as f64);
             metrics.files_removed.avg = (metrics.files_removed.total_size as f64)
@@ -285,7 +341,7 @@ impl MergePlan {
         if !actions.is_empty() {
             let mut metadata = Map::new();
             metadata.insert("readVersion".to_owned(), table.version().into());
-            let maybe_map_metrics = serde_json::to_value(metrics.clone());
+            let maybe_map_metrics = serde_json::to_value(MetricsDeltaLog::from_metrics(&metrics));
             if let Ok(map) = maybe_map_metrics {
                 metadata.insert("operationMetrics".to_owned(), map);
             }
