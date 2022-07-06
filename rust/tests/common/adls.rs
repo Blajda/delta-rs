@@ -58,7 +58,7 @@ pub async fn setup_azure_gen2_context() -> TestContext {
     let file_system_client = data_lake_client.into_file_system_client(file_system_name.to_owned());
     file_system_client.create().into_future().await.unwrap();
 
-    let table_uri = format!("adls2://{}/{}/", storage_account_name, file_system_name);
+    let table_uri = format!("adls2://{}/{}", storage_account_name, file_system_name);
 
     config.insert("URI".to_string(), table_uri);
     config.insert(
