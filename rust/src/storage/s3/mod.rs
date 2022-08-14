@@ -114,10 +114,6 @@ impl S3LockClient {
             }
 
             Ok(())
-        } else {
-            Err(StorageError::S3Generic(
-                "Acquired lock with no lock data".to_string(),
-            ))
         }
     }
 
