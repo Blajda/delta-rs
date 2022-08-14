@@ -114,6 +114,8 @@ impl S3LockClient {
             }
 
             Ok(())
+        } else {
+            Ok(())
         }
     }
 
