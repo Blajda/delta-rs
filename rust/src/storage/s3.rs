@@ -79,9 +79,6 @@ enum S3LockError {
 
     #[error("Rename target already exists")]
     AlreadyExists,
-
-    #[error("Atomic rename requires a LockClient for S3 backends.")]
-    LockClientRequired,
 }
 
 impl From<S3LockError> for ObjectStoreError {
@@ -458,7 +455,10 @@ impl ObjectStore for S3StorageBackend {
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
         let lock_client = match self.s3_lock_client {
             Some(ref lock_client) => lock_client,
-            None => return Err(S3LockError::LockClientRequired.into()),
+            None => {
+                self.rename_no_replace(from, to).await?;
+                return Ok(());
+            },
         };
         lock_client.rename_with_lock(self, from, to).await?;
         Ok(())
