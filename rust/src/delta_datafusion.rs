@@ -397,11 +397,8 @@ impl TableProvider for DeltaTable {
                 filters,
             )
             .await?;
-        let mut url = self.table_uri();
-        if url.ends_with(':') {
-            url += "//"; // table_uri() trims slashes from `memory://` so add them back
-        }
-        let delta_scan = DeltaScan { url, parquet_scan };
+        let object_store_url = self.table.storage.object_store_url();
+        let delta_scan = DeltaScan { object_store_url.as_str().to_string(), parquet_scan };
 
         Ok(Arc::new(delta_scan))
     }
