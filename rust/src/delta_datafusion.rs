@@ -397,8 +397,8 @@ impl TableProvider for DeltaTable {
                 filters,
             )
             .await?;
-        let object_store_url = self.table.storage.object_store_url();
-        let delta_scan = DeltaScan { object_store_url.as_str().to_string(), parquet_scan };
+        let object_store_url = self.storage.object_store_url();
+        let delta_scan = DeltaScan {url: object_store_url.as_str().to_string(), parquet_scan };
 
         Ok(Arc::new(delta_scan))
     }
