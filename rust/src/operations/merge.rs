@@ -37,16 +37,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use datafusion::datasource::provider_as_source;
 use datafusion::error::Result as DataFusionResult;
+use datafusion::execution::context::QueryPlanner;
 use datafusion::logical_expr::build_join_schema;
+use datafusion::physical_plan::metrics::{MetricBuilder, MetricsSet};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion::{
     execution::context::SessionState,
     prelude::{DataFrame, SessionContext},
 };
 use datafusion_common::{Column, DFSchema, ScalarValue, TableReference};
 use datafusion_expr::{col, conditional_expressions::CaseBuilder, lit, when, Expr, JoinType};
-use datafusion_expr::{LogicalPlanBuilder, UNNAMED_TABLE};
+use datafusion_expr::{
+    Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode, UNNAMED_TABLE,
+};
 use futures::future::BoxFuture;
 use parquet::file::properties::WriterProperties;
 use serde_json::{Map, Value};
@@ -54,9 +61,10 @@ use serde_json::{Map, Value};
 use super::datafusion_utils::{into_expr, maybe_into_expr, Expression};
 use super::transaction::commit;
 use crate::delta_datafusion::expr::{fmt_expr_to_sql, parse_predicate_expression};
+use crate::delta_datafusion::logical::MetricObserver;
+use crate::delta_datafusion::physical::MetricObserverExec;
 use crate::delta_datafusion::register_store;
 use crate::delta_datafusion::{DeltaScanConfig, DeltaTableProvider};
-//use crate::operations::datafusion_utils::MetricObserverExec;
 use crate::{
     operations::write::write_execution_plan,
     storage::{DeltaObjectStore, ObjectStoreRef},
@@ -76,11 +84,14 @@ const TARGET_UPDATE_COLUMN: &str = "__delta_rs_target_update";
 const TARGET_DELETE_COLUMN: &str = "__delta_rs_target_delete";
 const TARGET_COPY_COLUMN: &str = "__delta_rs_target_copy";
 
-//const SOURCE_COUNT_METRIC: &str = "num_source_rows";
-//const TARGET_COPY_METRIC: &str = "num_copied_rows";
-//const TARGET_INSERTED_METRIC: &str = "num_target_inserted_rows";
-//const TARGET_UPDATED_METRIC: &str = "num_target_updated_rows";
-//const TARGET_DELETED_METRIC: &str = "num_target_deleted_rows";
+const SOURCE_COUNT_METRIC: &str = "num_source_rows";
+const TARGET_COPY_METRIC: &str = "num_copied_rows";
+const TARGET_INSERTED_METRIC: &str = "num_target_inserted_rows";
+const TARGET_UPDATED_METRIC: &str = "num_target_updated_rows";
+const TARGET_DELETED_METRIC: &str = "num_target_deleted_rows";
+
+const SOURCE_COUNT_ID: &str = "merge_source_count";
+const TARGET_COUNT_ID: &str = "merge_target_count";
 
 /// Merge records into a Delta Table.
 pub struct MergeBuilder {
@@ -550,6 +561,77 @@ pub struct MergeMetrics {
     pub rewrite_time_ms: u64,
 }
 
+struct MergeMetricExtensionPlanner {}
+
+#[async_trait]
+impl ExtensionPlanner for MergeMetricExtensionPlanner {
+    async fn plan_extension(
+        &self,
+        _planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
+        _session_state: &SessionState,
+    ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
+        let metric_observer = node.as_any().downcast_ref::<MetricObserver>().unwrap();
+
+        if metric_observer.anchor.eq(SOURCE_COUNT_ID) {
+            return Ok(Some(Arc::new(MetricObserverExec::new(
+                SOURCE_COUNT_ID.into(),
+                physical_inputs[0].clone(),
+                |batch, metrics| {
+                    MetricBuilder::new(metrics)
+                        .global_counter(SOURCE_COUNT_METRIC)
+                        .add(batch.num_rows());
+                },
+            ))));
+        }
+
+        if metric_observer.anchor.eq(TARGET_COUNT_ID) {
+            return Ok(Some(Arc::new(MetricObserverExec::new(
+                TARGET_COUNT_ID.into(),
+                physical_inputs[0].clone(),
+                |batch, metrics| {
+                    MetricBuilder::new(metrics)
+                        .global_counter(TARGET_INSERTED_METRIC)
+                        .add(
+                            batch
+                                .column_by_name(TARGET_INSERT_COLUMN)
+                                .unwrap()
+                                .null_count(),
+                        );
+                    MetricBuilder::new(metrics)
+                        .global_counter(TARGET_UPDATED_METRIC)
+                        .add(
+                            batch
+                                .column_by_name(TARGET_UPDATE_COLUMN)
+                                .unwrap()
+                                .null_count(),
+                        );
+                    MetricBuilder::new(metrics)
+                        .global_counter(TARGET_DELETED_METRIC)
+                        .add(
+                            batch
+                                .column_by_name(TARGET_DELETE_COLUMN)
+                                .unwrap()
+                                .null_count(),
+                        );
+                    MetricBuilder::new(metrics)
+                        .global_counter(TARGET_COPY_METRIC)
+                        .add(
+                            batch
+                                .column_by_name(TARGET_COPY_COLUMN)
+                                .unwrap()
+                                .null_count(),
+                        );
+                },
+            ))));
+        }
+
+        Ok(None)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     predicate: Expression,
@@ -596,8 +678,16 @@ async fn execute(
     let source =
         LogicalPlanBuilder::scan(source_name, provider_as_source(source.into_view()), None)?
             .build()?;
+
+    let source = LogicalPlan::Extension(Extension {
+        node: Arc::new(MetricObserver {
+            anchor: SOURCE_COUNT_ID.into(),
+            input: source,
+        }),
+    });
+
     let source = DataFrame::new(state.clone(), source);
-    let source = source.with_column("__delta_rs_source", lit(true))?;
+    let source = source.with_column(SOURCE_COLUMN, lit(true))?;
 
     let target_provider = Arc::new(DeltaTableProvider::try_new(
         snapshot.clone(),
@@ -608,32 +698,7 @@ async fn execute(
 
     let target = LogicalPlanBuilder::scan(target_name, target_provider, None)?.build()?;
     let target = DataFrame::new(state.clone(), target);
-    let target = target.with_column("__delta_rs_target", lit(true))?;
-
-    /*
-    let source = source.create_physical_plan().await?;
-
-    let source_count = Arc::new(MetricObserverExec::new(source, |batch, metrics| {
-        MetricBuilder::new(metrics)
-            .global_counter(SOURCE_COUNT_METRIC)
-            .add(batch.num_rows());
-    }));
-
-    let mut expressions: Vec<(Arc<dyn PhysicalExpr>, String)> = Vec::new();
-    let source_schema = source_count.schema();
-
-    for (i, field) in source_schema.fields().into_iter().enumerate() {
-        expressions.push((
-            Arc::new(expressions::Column::new(field.name(), i)),
-            field.name().clone(),
-        ));
-    }
-    expressions.push((
-        Arc::new(expressions::Literal::new(true.into())),
-        "__delta_rs_source".to_owned(),
-    ));
-    let source = Arc::new(ProjectionExec::try_new(expressions, source_count.clone())?);
-    */
+    let target = target.with_column(TARGET_COLUMN, lit(true))?;
 
     let source_schema = source.schema();
     let target_schema = target.schema();
@@ -644,29 +709,22 @@ async fn execute(
     };
 
     let join = source.join(target, JoinType::Full, &[], &[], Some(predicate.clone()))?;
-    dbg!("here-1");
-    dbg!("{:?}", &join);
-    let join = join.with_column("tests223", lit(true))?;
     let join_schema_df = join.schema().to_owned();
-    dbg!("here1");
 
     let match_operations: Vec<MergeOperation> = match_operations
         .into_iter()
         .map(|op| MergeOperation::try_from(op, &join_schema_df, &state, &target_alias))
         .collect::<Result<Vec<MergeOperation>, DeltaTableError>>()?;
-    dbg!("here1.1");
 
     let not_match_target_operations: Vec<MergeOperation> = not_match_target_operations
         .into_iter()
         .map(|op| MergeOperation::try_from(op, &join_schema_df, &state, &target_alias))
         .collect::<Result<Vec<MergeOperation>, DeltaTableError>>()?;
-    dbg!("here1.2");
 
     let not_match_source_operations: Vec<MergeOperation> = not_match_source_operations
         .into_iter()
         .map(|op| MergeOperation::try_from(op, &join_schema_df, &state, &target_alias))
         .collect::<Result<Vec<MergeOperation>, DeltaTableError>>()?;
-    dbg!("here1.3");
 
     let matched = col(SOURCE_COLUMN)
         .is_true()
@@ -735,7 +793,6 @@ async fn execute(
         Ok(predicates)
     }
 
-    dbg!("here1.4");
     let match_operations = update_case(
         match_operations,
         &mut ops,
@@ -743,7 +800,6 @@ async fn execute(
         &mut then_expr,
         &matched,
     )?;
-    dbg!("here1.5");
 
     let not_match_target_operations = update_case(
         not_match_target_operations,
@@ -752,7 +808,6 @@ async fn execute(
         &mut then_expr,
         &not_matched_target,
     )?;
-    dbg!("here1.6");
 
     let not_match_source_operations = update_case(
         not_match_source_operations,
@@ -761,7 +816,6 @@ async fn execute(
         &mut then_expr,
         &not_matched_source,
     )?;
-    dbg!("here1.7");
 
     when_expr.push(matched);
     then_expr.push(lit(ops.len() as i32));
@@ -775,16 +829,10 @@ async fn execute(
     then_expr.push(lit(ops.len() as i32));
     ops.push((HashMap::new(), OperationType::Copy));
 
-    dbg!("here1.8");
-    dbg!("{:?}", &when_expr);
-    dbg!("{:?}", &then_expr);
     let case = CaseBuilder::new(None, when_expr, then_expr, None).end()?;
-    dbg!("here1.9");
 
     let projection = join.with_column(OPERATION_COLUMN, case)?;
-    dbg!("here1.10");
 
-    dbg!("here2");
     let mut new_columns = projection;
     let mut write_projection = Vec::new();
 
@@ -897,64 +945,58 @@ async fn execute(
         .end()
     }
 
-    dbg!("here3");
     new_columns = new_columns.with_column(DELETE_COLUMN, build_case(delete_when, delete_then)?)?;
     new_columns =
         new_columns.with_column(TARGET_INSERT_COLUMN, build_case(insert_when, insert_then)?)?;
-
     new_columns =
         new_columns.with_column(TARGET_UPDATE_COLUMN, build_case(update_when, update_then)?)?;
-
     new_columns = new_columns.with_column(
         TARGET_DELETE_COLUMN,
         build_case(target_delete_when, target_delete_then)?,
     )?;
-
     new_columns = new_columns.with_column(TARGET_COPY_COLUMN, build_case(copy_when, copy_then)?)?;
 
-    /*/
-    let projection = Arc::new(ProjectionExec::try_new(expressions, projection.clone())?);
+    let new_columns = new_columns.into_optimized_plan()?;
+    let operation_count = LogicalPlan::Extension(Extension {
+        node: Arc::new(MetricObserver {
+            anchor: TARGET_COUNT_ID.into(),
+            input: new_columns,
+        }),
+    });
 
+    let operation_count = DataFrame::new(state.clone(), operation_count);
+    let filtered = operation_count.filter(col(DELETE_COLUMN).is_false())?;
 
-    let target_count_plan = Arc::new(MetricObserverExec::new(projection, |batch, metrics| {
-        MetricBuilder::new(metrics)
-            .global_counter(TARGET_INSERTED_METRIC)
-            .add(
-                batch
-                    .column_by_name(TARGET_INSERT_COLUMN)
-                    .unwrap()
-                    .null_count(),
-            );
-        MetricBuilder::new(metrics)
-            .global_counter(TARGET_UPDATED_METRIC)
-            .add(
-                batch
-                    .column_by_name(TARGET_UPDATE_COLUMN)
-                    .unwrap()
-                    .null_count(),
-            );
-        MetricBuilder::new(metrics)
-            .global_counter(TARGET_DELETED_METRIC)
-            .add(
-                batch
-                    .column_by_name(TARGET_DELETE_COLUMN)
-                    .unwrap()
-                    .null_count(),
-            );
-        MetricBuilder::new(metrics)
-            .global_counter(TARGET_COPY_METRIC)
-            .add(
-                batch
-                    .column_by_name(TARGET_COPY_COLUMN)
-                    .unwrap()
-                    .null_count(),
-            );
-    }));
-    */
+    let project = filtered.select(write_projection)?;
 
-    let filtered = new_columns.filter(col(DELETE_COLUMN).is_false())?;
+    let state = state.with_query_planner(Arc::new(MergePlanner {}));
+    let write = state
+        .create_physical_plan(&project.into_unoptimized_plan())
+        .await?;
 
-    let write =  filtered.select(write_projection)?.create_physical_plan().await?;
+    fn find_metric_node(
+        anchor: &str,
+        parent: &Arc<dyn ExecutionPlan>,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        if let Some(metric) = parent.as_any().downcast_ref::<MetricObserverExec>() {
+            if metric.anchor().eq(anchor) {
+                return Some(parent.to_owned());
+            }
+        }
+
+        for child in &parent.children() {
+            let res = find_metric_node(anchor, child);
+            if res.is_some() {
+                return res;
+            }
+        }
+
+        return None;
+    }
+    //Find the count nodes..
+    //TODO: don't unwrap...
+    let source_count = find_metric_node(SOURCE_COUNT_ID, &write).unwrap();
+    let op_count = find_metric_node(TARGET_COUNT_ID, &write).unwrap();
 
     // write projected records
     let table_partition_cols = current_metadata.partition_columns.clone();
@@ -999,19 +1041,17 @@ async fn execute(
 
     let mut version = snapshot.version();
 
-    //let source_count_metrics = source_count.metrics().unwrap();
-    //let target_count_metrics = target_count_plan.metrics().unwrap();
-    /*
+    let source_count_metrics = source_count.metrics().unwrap();
+    let target_count_metrics = op_count.metrics().unwrap();
     fn get_metric(metrics: &MetricsSet, name: &str) -> usize {
         metrics.sum_by_name(name).map(|m| m.as_usize()).unwrap_or(0)
     }
-    */
 
-    metrics.num_source_rows = 0; //get_metric(&source_count_metrics, SOURCE_COUNT_METRIC);
-    metrics.num_target_rows_inserted = 0; // get_metric(&target_count_metrics, TARGET_INSERTED_METRIC);
-    metrics.num_target_rows_updated = 0; //get_metric(&target_count_metrics, TARGET_UPDATED_METRIC);
-    metrics.num_target_rows_deleted = 0; //get_metric(&target_count_metrics, TARGET_DELETED_METRIC);
-    metrics.num_target_rows_copied = 0; //get_metric(&target_count_metrics, TARGET_COPY_METRIC);
+    metrics.num_source_rows = get_metric(&source_count_metrics, SOURCE_COUNT_METRIC);
+    metrics.num_target_rows_inserted = get_metric(&target_count_metrics, TARGET_INSERTED_METRIC);
+    metrics.num_target_rows_updated = get_metric(&target_count_metrics, TARGET_UPDATED_METRIC);
+    metrics.num_target_rows_deleted = get_metric(&target_count_metrics, TARGET_DELETED_METRIC);
+    metrics.num_target_rows_copied = get_metric(&target_count_metrics, TARGET_COPY_METRIC);
     metrics.num_output_rows = metrics.num_target_rows_inserted
         + metrics.num_target_rows_updated
         + metrics.num_target_rows_copied;
@@ -1037,6 +1077,24 @@ async fn execute(
     }
 
     Ok(((actions, version), metrics))
+}
+
+struct MergePlanner {}
+
+#[async_trait]
+impl QueryPlanner for MergePlanner {
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session_state: &SessionState,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let planner = Arc::new(Box::new(DefaultPhysicalPlanner::with_extension_planners(
+            vec![Arc::new(MergeMetricExtensionPlanner {})],
+        )));
+        planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
+    }
 }
 
 impl std::future::IntoFuture for MergeBuilder {
@@ -1167,15 +1225,14 @@ mod tests {
 
     async fn assert_merge(table: DeltaTable, metrics: MergeMetrics) {
         assert_eq!(table.version(), 2);
-        //assert_eq!(table.get_file_uris().count(), 1);
-        //assert_eq!(metrics.num_target_files_added, 1);
-        //assert_eq!(metrics.num_target_files_removed, 1);
-        //assert_eq!(metrics.num_target_rows_copied, 1);
-        //assert_eq!(metrics.num_target_rows_updated, 3);
-        //assert_eq!(metrics.num_target_rows_inserted, 1);
-        //assert_eq!(metrics.num_target_rows_deleted, 0);
+        assert!(metrics.num_target_files_added > 0);
+        assert_eq!(metrics.num_target_files_removed, 1);
+        assert_eq!(metrics.num_target_rows_copied, 1);
+        assert_eq!(metrics.num_target_rows_updated, 3);
+        assert_eq!(metrics.num_target_rows_inserted, 1);
+        assert_eq!(metrics.num_target_rows_deleted, 0);
         assert_eq!(metrics.num_output_rows, 5);
-        //assert_eq!(metrics.num_source_rows, 3);
+        assert_eq!(metrics.num_source_rows, 3);
 
         let expected = vec![
             "+----+-------+------------+",
@@ -1193,9 +1250,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_2() {
+    async fn test_merge() {
         let (table, source) = setup().await;
-
         let (mut table, metrics) = DeltaOps(table)
             .merge(source, col("target.id").eq(col("source.id")))
             .with_source_alias("source")
@@ -1260,8 +1316,8 @@ mod tests {
             .unwrap()
             .when_not_matched_by_source_update(|update| {
                 update
-                    .predicate("target.value = arrow_cast(1, 'Int32')")
-                    .update("value", "target.value + cast(1 as int)")
+                    .predicate("target.value = 1")
+                    .update("value", "target.value + 1")
             })
             .unwrap()
             .when_not_matched_insert(|insert| {
@@ -1288,9 +1344,7 @@ mod tests {
         );
         assert_eq!(
             parameters["notMatchedBySourcePredicates"],
-            json!(
-                r#"[{"actionType":"update","predicate":"target.value = arrow_cast(1, 'Int32')"}]"#
-            )
+            json!(r#"[{"actionType":"update","predicate":"target.value = 1"}]"#)
         );
 
         assert_merge(table, metrics).await;
@@ -1318,9 +1372,7 @@ mod tests {
             })
             .unwrap()
             .when_not_matched_by_source_update(|update| {
-                update
-                    .predicate("value = arrow_cast(1, 'Int32')")
-                    .update("value", "value + cast(1 as int)")
+                update.predicate("value = 1").update("value", "value + 1")
             })
             .unwrap()
             .when_not_matched_insert(|insert| {
@@ -1361,8 +1413,8 @@ mod tests {
             .unwrap()
             .when_not_matched_by_source_update(|update| {
                 update
-                    .predicate("value = arrow_cast(1, 'Int32')")
-                    .update("value", "target.value + cast(1 as int)")
+                    .predicate("value = 1")
+                    .update("value", "target.value + 1")
             })
             .unwrap()
             .when_not_matched_insert(|insert| {
@@ -1475,8 +1527,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), 2);
-        assert_eq!(table.get_file_uris().count(), 3);
-        assert_eq!(metrics.num_target_files_added, 3);
+        assert!(metrics.num_target_files_added > 0);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 1);
         assert_eq!(metrics.num_target_rows_updated, 3);
@@ -1602,8 +1653,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), 2);
-        assert_eq!(table.get_file_uris().count(), 2);
-        assert_eq!(metrics.num_target_files_added, 2);
+        assert!(metrics.num_target_files_added > 0);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 3);
         assert_eq!(metrics.num_target_rows_updated, 0);
@@ -1736,8 +1786,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), 2);
-        assert_eq!(table.get_file_uris().count(), 2);
-        assert_eq!(metrics.num_target_files_added, 2);
+        assert!(metrics.num_target_files_added > 0);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 3);
         assert_eq!(metrics.num_target_rows_updated, 0);

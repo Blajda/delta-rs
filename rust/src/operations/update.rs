@@ -43,18 +43,17 @@ use parquet::file::properties::WriterProperties;
 use serde_json::{Map, Value};
 
 use crate::{
-    delta_datafusion::{expr::fmt_expr_to_sql, find_files, register_store, DeltaScanBuilder},
+    delta_datafusion::{
+        expr::fmt_expr_to_sql, find_files, physical::MetricObserverExec, register_store,
+        DeltaScanBuilder,
+    },
     protocol::{Action, DeltaOperation, Remove},
     storage::{DeltaObjectStore, ObjectStoreRef},
     table::state::DeltaTableState,
     DeltaResult, DeltaTable, DeltaTableError,
 };
 
-use super::{
-    datafusion_utils::{Expression, MetricObserverExec},
-    transaction::commit,
-    write::write_execution_plan,
-};
+use super::{datafusion_utils::Expression, transaction::commit, write::write_execution_plan};
 
 /// Updates records in the Delta Table.
 /// See this module's documentation for more information
@@ -277,6 +276,7 @@ async fn execute(
         Arc::new(ProjectionExec::try_new(expressions, scan)?);
 
     let count_plan = Arc::new(MetricObserverExec::new(
+        "update_count".into(),
         projection_predicate.clone(),
         |batch, metrics| {
             let array = batch.column_by_name("__delta_rs_update_predicate").unwrap();

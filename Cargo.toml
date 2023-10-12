@@ -15,23 +15,23 @@ debug = "line-tables-only"
 
 [workspace.dependencies]
 # arrow
-arrow = { version = "46" }
-arrow-array = { version = "46" }
-arrow-buffer = { version = "46" }
-arrow-cast = { version = "46" }
-arrow-ord = { version = "46" }
-arrow-row = { version = "46" }
-arrow-schema = { version = "46" }
-arrow-select = { version = "46" }
-parquet = { version = "46" }
+arrow = { version = "47" }
+arrow-array = { version = "47" }
+arrow-buffer = { version = "47" }
+arrow-cast = { version = "47" }
+arrow-ord = { version = "47" }
+arrow-row = { version = "47" }
+arrow-schema = { version = "47" }
+arrow-select = { version = "47" }
+parquet = { version = "47" }
 
 # datafusion
-datafusion = { version = "31" }
-datafusion-expr = { version = "31" }
-datafusion-common = { version = "31" }
-datafusion-proto = { version = "31" }
-datafusion-sql = { version = "31" }
-datafusion-physical-expr = { version = "31" }
+datafusion = { git="https://github.com/apache/arrow-datafusion" }
+datafusion-expr = { git="https://github.com/apache/arrow-datafusion" }
+datafusion-common = { git="https://github.com/apache/arrow-datafusion" }
+datafusion-proto = { git="https://github.com/apache/arrow-datafusion" }
+datafusion-sql = { git="https://github.com/apache/arrow-datafusion" }
+datafusion-physical-expr = { git="https://github.com/apache/arrow-datafusion" }
 
 # serde
 serde = { version = "1", features = ["derive"] }
@@ -46,7 +46,7 @@ url = { version = "2" }
 uuid = { version = "1" }
 
 # runtime / async
-async-trait = { version = "0.1" }
+async-trait = { version = "0.1.73" }
 futures = { version = "0.3" }
 tokio = { version = "1" }
 num_cpus = { version = "1" }
