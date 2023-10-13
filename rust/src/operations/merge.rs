@@ -8,8 +8,7 @@
 //! specified matter.  See [`MergeBuilder`] for more information
 //!
 //! *WARNING* The current implementation rewrites the entire delta table so only
-//! use on small to medium sized tables. The solution also cannot take advantage
-//! of multiple threads and is limited to a single single thread.
+//! use on small to medium sized tables. 
 //! Enhancements tracked at #850
 //!
 //! # Example
@@ -62,7 +61,7 @@ use super::datafusion_utils::{into_expr, maybe_into_expr, Expression};
 use super::transaction::commit;
 use crate::delta_datafusion::expr::{fmt_expr_to_sql, parse_predicate_expression};
 use crate::delta_datafusion::logical::MetricObserver;
-use crate::delta_datafusion::physical::MetricObserverExec;
+use crate::delta_datafusion::physical::{find_metric_node, MetricObserverExec};
 use crate::delta_datafusion::register_store;
 use crate::delta_datafusion::{DeltaScanConfig, DeltaTableProvider};
 use crate::{
@@ -573,59 +572,59 @@ impl ExtensionPlanner for MergeMetricExtensionPlanner {
         physical_inputs: &[Arc<dyn ExecutionPlan>],
         _session_state: &SessionState,
     ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
-        let metric_observer = node.as_any().downcast_ref::<MetricObserver>().unwrap();
+        if let Some(metric_observer) = node.as_any().downcast_ref::<MetricObserver>() {
+            if metric_observer.id.eq(SOURCE_COUNT_ID) {
+                return Ok(Some(MetricObserverExec::try_new(
+                    SOURCE_COUNT_ID.into(),
+                    physical_inputs,
+                    |batch, metrics| {
+                        MetricBuilder::new(metrics)
+                            .global_counter(SOURCE_COUNT_METRIC)
+                            .add(batch.num_rows());
+                    },
+                )?));
+            }
 
-        if metric_observer.anchor.eq(SOURCE_COUNT_ID) {
-            return Ok(Some(Arc::new(MetricObserverExec::new(
-                SOURCE_COUNT_ID.into(),
-                physical_inputs[0].clone(),
-                |batch, metrics| {
-                    MetricBuilder::new(metrics)
-                        .global_counter(SOURCE_COUNT_METRIC)
-                        .add(batch.num_rows());
-                },
-            ))));
-        }
-
-        if metric_observer.anchor.eq(TARGET_COUNT_ID) {
-            return Ok(Some(Arc::new(MetricObserverExec::new(
-                TARGET_COUNT_ID.into(),
-                physical_inputs[0].clone(),
-                |batch, metrics| {
-                    MetricBuilder::new(metrics)
-                        .global_counter(TARGET_INSERTED_METRIC)
-                        .add(
-                            batch
-                                .column_by_name(TARGET_INSERT_COLUMN)
-                                .unwrap()
-                                .null_count(),
-                        );
-                    MetricBuilder::new(metrics)
-                        .global_counter(TARGET_UPDATED_METRIC)
-                        .add(
-                            batch
-                                .column_by_name(TARGET_UPDATE_COLUMN)
-                                .unwrap()
-                                .null_count(),
-                        );
-                    MetricBuilder::new(metrics)
-                        .global_counter(TARGET_DELETED_METRIC)
-                        .add(
-                            batch
-                                .column_by_name(TARGET_DELETE_COLUMN)
-                                .unwrap()
-                                .null_count(),
-                        );
-                    MetricBuilder::new(metrics)
-                        .global_counter(TARGET_COPY_METRIC)
-                        .add(
-                            batch
-                                .column_by_name(TARGET_COPY_COLUMN)
-                                .unwrap()
-                                .null_count(),
-                        );
-                },
-            ))));
+            if metric_observer.id.eq(TARGET_COUNT_ID) {
+                return Ok(Some(MetricObserverExec::try_new(
+                    TARGET_COUNT_ID.into(),
+                    physical_inputs,
+                    |batch, metrics| {
+                        MetricBuilder::new(metrics)
+                            .global_counter(TARGET_INSERTED_METRIC)
+                            .add(
+                                batch
+                                    .column_by_name(TARGET_INSERT_COLUMN)
+                                    .unwrap()
+                                    .null_count(),
+                            );
+                        MetricBuilder::new(metrics)
+                            .global_counter(TARGET_UPDATED_METRIC)
+                            .add(
+                                batch
+                                    .column_by_name(TARGET_UPDATE_COLUMN)
+                                    .unwrap()
+                                    .null_count(),
+                            );
+                        MetricBuilder::new(metrics)
+                            .global_counter(TARGET_DELETED_METRIC)
+                            .add(
+                                batch
+                                    .column_by_name(TARGET_DELETE_COLUMN)
+                                    .unwrap()
+                                    .null_count(),
+                            );
+                        MetricBuilder::new(metrics)
+                            .global_counter(TARGET_COPY_METRIC)
+                            .add(
+                                batch
+                                    .column_by_name(TARGET_COPY_COLUMN)
+                                    .unwrap()
+                                    .null_count(),
+                            );
+                    },
+                )?));
+            }
         }
 
         Ok(None)
@@ -681,7 +680,7 @@ async fn execute(
 
     let source = LogicalPlan::Extension(Extension {
         node: Arc::new(MetricObserver {
-            anchor: SOURCE_COUNT_ID.into(),
+            id: SOURCE_COUNT_ID.into(),
             input: source,
         }),
     });
@@ -702,7 +701,7 @@ async fn execute(
 
     let source_schema = source.schema();
     let target_schema = target.schema();
-    let join_schema_df = build_join_schema(&source_schema, &target_schema, &JoinType::Full)?;
+    let join_schema_df = build_join_schema(source_schema, target_schema, &JoinType::Full)?;
     let predicate = match predicate {
         Expression::DataFusion(expr) => expr,
         Expression::String(s) => parse_predicate_expression(&join_schema_df, s, &state)?,
@@ -959,7 +958,7 @@ async fn execute(
     let new_columns = new_columns.into_optimized_plan()?;
     let operation_count = LogicalPlan::Extension(Extension {
         node: Arc::new(MetricObserver {
-            anchor: TARGET_COUNT_ID.into(),
+            id: TARGET_COUNT_ID.into(),
             input: new_columns,
         }),
     });
@@ -968,35 +967,15 @@ async fn execute(
     let filtered = operation_count.filter(col(DELETE_COLUMN).is_false())?;
 
     let project = filtered.select(write_projection)?;
+    let optimized = &project.into_optimized_plan()?;
+    dbg!("{:?}", &optimized);
 
     let state = state.with_query_planner(Arc::new(MergePlanner {}));
-    let write = state
-        .create_physical_plan(&project.into_unoptimized_plan())
-        .await?;
+    let write = state.create_physical_plan(optimized).await?;
 
-    fn find_metric_node(
-        anchor: &str,
-        parent: &Arc<dyn ExecutionPlan>,
-    ) -> Option<Arc<dyn ExecutionPlan>> {
-        if let Some(metric) = parent.as_any().downcast_ref::<MetricObserverExec>() {
-            if metric.anchor().eq(anchor) {
-                return Some(parent.to_owned());
-            }
-        }
-
-        for child in &parent.children() {
-            let res = find_metric_node(anchor, child);
-            if res.is_some() {
-                return res;
-            }
-        }
-
-        return None;
-    }
-    //Find the count nodes..
-    //TODO: don't unwrap...
-    let source_count = find_metric_node(SOURCE_COUNT_ID, &write).unwrap();
-    let op_count = find_metric_node(TARGET_COUNT_ID, &write).unwrap();
+    let err = || DeltaTableError::Generic("Unable to locate expected metric node".into());
+    let source_count = find_metric_node(SOURCE_COUNT_ID, &write).ok_or_else(err)?;
+    let op_count = find_metric_node(TARGET_COUNT_ID, &write).ok_or_else(err)?;
 
     // write projected records
     let table_partition_cols = current_metadata.partition_columns.clone();
