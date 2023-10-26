@@ -8,7 +8,7 @@
 //! specified matter.  See [`MergeBuilder`] for more information
 //!
 //! *WARNING* The current implementation rewrites the entire delta table so only
-//! use on small to medium sized tables. 
+//! use on small to medium sized tables.
 //! Enhancements tracked at #850
 //!
 //! # Example
@@ -533,7 +533,7 @@ impl MergeOperationConfig {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 /// Metrics for the Merge Operation
 pub struct MergeMetrics {
     /// Number of rows in the source data
@@ -968,7 +968,6 @@ async fn execute(
 
     let project = filtered.select(write_projection)?;
     let optimized = &project.into_optimized_plan()?;
-    dbg!("{:?}", &optimized);
 
     let state = state.with_query_planner(Arc::new(MergePlanner {}));
     let write = state.create_physical_plan(optimized).await?;

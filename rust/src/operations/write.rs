@@ -280,9 +280,13 @@ pub(crate) async fn write_execution_plan(
         let handle: tokio::task::JoinHandle<DeltaResult<Vec<Add>>> =
             tokio::task::spawn(async move {
                 while let Some(maybe_batch) = stream.next().await {
+                    dbg!("get batch {}", i);
                     let batch = maybe_batch?;
+                    dbg!("check batch {}", i);
                     checker_stream.check_batch(&batch).await?;
+                    dbg!("cast batch {}", i);
                     let arr = cast_record_batch(&batch, inner_schema.clone(), safe_cast)?;
+                    dbg!("write batch {}", i);
                     writer.write(&arr).await?;
                 }
                 writer.close().await

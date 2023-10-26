@@ -615,15 +615,18 @@ impl<'a> DeltaScanBuilder<'a> {
                 .collect::<Vec<arrow::datatypes::FieldRef>>(),
         ));
 
+        dbg!("{:?}", &schema);
+
         let mut table_partition_cols = table_partition_cols
             .iter()
-            .map(|c| Ok((c.to_owned(), schema.field_with_name(c)?.data_type().clone())))
+            .map(|c| Ok(schema.field_with_name(c)?.to_owned()))
             .collect::<Result<Vec<_>, ArrowError>>()?;
 
         if let Some(file_column_name) = &config.file_column_name {
-            table_partition_cols.push((
+            table_partition_cols.push(Field::new(
                 file_column_name.clone(),
                 wrap_partition_type_in_dict(DataType::Utf8),
+                false
             ));
         }
 
@@ -644,6 +647,8 @@ impl<'a> DeltaScanBuilder<'a> {
                 logical_filter.as_ref(),
             )
             .await?;
+
+        dbg!("{:?}", scan.schema());
 
         Ok(DeltaScan {
             table_uri: ensure_table_uri(self.object_store.root_uri())?
@@ -781,7 +786,7 @@ impl TableProvider for DeltaTableProvider {
         &self,
         _filter: &Expr,
     ) -> DataFusionResult<TableProviderFilterPushDown> {
-        Ok(TableProviderFilterPushDown::Inexact)
+        Ok(TableProviderFilterPushDown::Unsupported)
     }
 
     fn statistics(&self) -> Option<Statistics> {
@@ -852,7 +857,7 @@ impl ExecutionPlan for DeltaScan {
         self.parquet_scan.execute(partition, context)
     }
 
-    fn statistics(&self) -> Statistics {
+    fn statistics(&self) -> Result<Statistics, DataFusionError> {
         self.parquet_scan.statistics()
     }
 }
