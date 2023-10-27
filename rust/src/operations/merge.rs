@@ -55,6 +55,7 @@ use datafusion_expr::{
 };
 use futures::future::BoxFuture;
 use parquet::file::properties::WriterProperties;
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use super::datafusion_utils::{into_expr, maybe_into_expr, Expression};
@@ -125,12 +126,13 @@ pub struct MergeBuilder {
 
 impl MergeBuilder {
     /// Create a new [`MergeBuilder`]
-    pub fn new(
+    pub fn new<E: Into<Expression>>(
         object_store: ObjectStoreRef,
         snapshot: DeltaTableState,
-        predicate: Expression,
+        predicate: E,
         source: DataFrame,
     ) -> Self {
+        let predicate = predicate.into();
         Self {
             predicate,
             source,
@@ -495,7 +497,7 @@ impl MergeOperation {
                                 }
                             } else {
                                 return Err(DeltaTableError::Generic(
-                                    "Column must reference column in Delta table".into(),
+                                    format!("Table alias '{table}' in column reference '{table}.{name}' unknown. Hint: You must reference the Delta Table with alias '{alias}'.")
                                 ));
                             }
                         }
@@ -533,7 +535,7 @@ impl MergeOperationConfig {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Serialize, Debug)]
 /// Metrics for the Merge Operation
 pub struct MergeMetrics {
     /// Number of rows in the source data
@@ -1120,12 +1122,13 @@ impl std::future::IntoFuture for MergeBuilder {
 
 #[cfg(test)]
 mod tests {
-
     use crate::operations::DeltaOps;
     use crate::protocol::*;
     use crate::writer::test_utils::datafusion::get_data;
     use crate::writer::test_utils::get_arrow_schema;
     use crate::writer::test_utils::get_delta_schema;
+    use crate::writer::test_utils::setup_table_with_configuration;
+    use crate::DeltaConfigKey;
     use crate::DeltaTable;
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow::record_batch::RecordBatch;
@@ -1150,6 +1153,21 @@ mod tests {
             .unwrap();
         assert_eq!(table.version(), 0);
         table
+    }
+
+    #[tokio::test]
+    async fn test_merge_when_delta_table_is_append_only() {
+        let schema = get_arrow_schema(&None);
+        let table = setup_table_with_configuration(DeltaConfigKey::AppendOnly, Some("true")).await;
+        // append some data
+        let table = write_data(table, &schema).await;
+        // merge
+        let _err = DeltaOps(table)
+            .merge(merge_source(schema), col("target.id").eq(col("source.id")))
+            .with_source_alias("source")
+            .with_target_alias("target")
+            .await
+            .expect_err("Remove action is included when Delta table is append-only. Should error");
     }
 
     async fn write_data(table: DeltaTable, schema: &Arc<ArrowSchema>) -> DeltaTable {

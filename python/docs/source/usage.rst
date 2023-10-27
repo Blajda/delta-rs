@@ -193,14 +193,14 @@ Use :meth:`DeltaTable.schema` to retrieve the delta lake schema:
     Schema([Field(id, PrimitiveType("long"), nullable=True)])
 
 These schemas have a JSON representation that can be retrieved. To reconstruct
-from json, use :meth:`deltalake.schema.Schema.from_json()`.
+from json, use `schema.Schema.from_json()`.
 
 .. code-block:: python
 
     >>> dt.schema().json()
     '{"type":"struct","fields":[{"name":"id","type":"long","nullable":true,"metadata":{}}]}'
 
-Use :meth:`deltalake.schema.Schema.to_pyarrow()` to retrieve the PyArrow schema:
+Use `deltalake.schema.Schema.to_pyarrow()` to retrieve the PyArrow schema:
 
 .. code-block:: python
 
@@ -482,6 +482,103 @@ to append pass in ``mode='append'``:
 :py:meth:`write_deltalake` will raise :py:exc:`ValueError` if the schema of
 the data passed to it differs from the existing table's schema. If you wish to
 alter the schema as part of an overwrite pass in ``overwrite_schema=True``.
+
+Writing to s3
+~~~~~~~~~~~~~
+
+A locking mechanism is needed to prevent unsafe concurrent writes to a
+delta lake directory when writing to S3. DynamoDB is the only available
+locking provider at the moment in delta-rs. To enable DynamoDB as the
+locking provider, you need to set the **AWS_S3_LOCKING_PROVIDER** to 'dynamodb'
+as a ``storage_options`` or as an environment variable.
+
+Additionally, you must create a DynamoDB table with the name ``delta_rs_lock_table``
+so that it can be automatically recognized by delta-rs. Alternatively, you can
+use a table name of your choice, but you must set the **DYNAMO_LOCK_TABLE_NAME**
+variable to match your chosen table name. The required schema for the DynamoDB
+table is as follows:
+
+.. code-block:: json
+
+
+       {
+            "AttributeDefinitions": [
+                {
+                    "AttributeName": "key",
+                    "AttributeType": "S"
+                }
+            ],
+            "TableName": "delta_rs_lock_table",
+            "KeySchema": [
+                {
+                    "AttributeName": "key",
+                    "KeyType": "HASH"
+                }
+            ]
+       }
+
+Here is an example writing to s3 using this mechanism:
+
+.. code-block:: python
+
+    >>> from deltalake import write_deltalake
+    >>> df = pd.DataFrame({'x': [1, 2, 3]})
+    >>> storage_options = {'AWS_S3_LOCKING_PROVIDER': 'dynamodb', 'DYNAMO_LOCK_TABLE_NAME': 'custom_table_name'}
+    >>> write_deltalake('s3://path/to/table', df, 'storage_options'= storage_options)
+
+.. note::
+    if for some reason you don't want to use dynamodb as your locking mechanism you can
+    choose to set the `AWS_S3_ALLOW_UNSAFE_RENAME` variable to ``true`` in order to enable
+    S3 unsafe writes.
+
+Please note that this locking mechanism is not compatible with any other
+locking mechanisms, including the one used by Spark.
+
+Updating Delta Tables
+---------------------
+
+.. py:currentmodule:: deltalake.table
+
+Row values in an existing delta table can be updated with the :meth:`DeltaTable.update` command. A update
+dictionary has to be passed, where they key is the column you wish to update, and the value is a
+Expression in string format.
+
+Update all the rows for the column "processed" to the value True.
+
+.. code-block:: python
+
+    >>> from deltalake import write_deltalake, DeltaTable
+    >>> df = pd.DataFrame({'x': [1, 2, 3], 'deleted': [False, False, False]})
+    >>> write_deltalake('path/to/table', df)
+    >>> dt = DeltaTable('path/to/table')
+    >>> dt.update({"processed": "True"})
+    >>> dt.to_pandas()
+    >>>     x       processed
+    0       1       True
+    1       2       True
+    2       3       True
+.. note::
+    :meth:`DeltaTable.update` predicates and updates are all in string format. The predicates and expressions,
+    are parsed into Apache Datafusion expressions.
+
+Apply a soft deletion based on a predicate, so update all the rows for the column "deleted" to the value 
+True where x = 3
+
+.. code-block:: python
+
+    >>> from deltalake import write_deltalake, DeltaTable
+    >>> df = pd.DataFrame({'x': [1, 2, 3], 'deleted': [False, False, False]})
+    >>> write_deltalake('path/to/table', df)
+    >>> dt = DeltaTable('path/to/table')
+    >>> dt.update(
+    ...    updates={"deleted": "True"},
+    ...    predicate= 'x = 3',
+    ... )
+    >>> dt.to_pandas()
+    >>>     x       deleted
+    0       1       False
+    1       2       False
+    2       3       True
 
 
 Overwriting a partition

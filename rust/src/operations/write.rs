@@ -14,6 +14,16 @@
 //!
 //! In combination with `Overwrite`, a `replaceWhere` option can be used to transactionally
 //! replace data that matches a predicate.
+//!
+//! # Example
+//! ```rust ignore
+//! let id_field = arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int32, false);
+//! let schema = Arc::new(arrow::datatypes::Schema::new(vec![id_field]));
+//! let ids = arrow::array::Int32Array::from(vec![1, 2, 3, 4, 5]);
+//! let batch = RecordBatch::try_new(schema, vec![Arc::new(ids)])?;
+//! let ops = DeltaOps::try_from_uri("../path/to/empty/dir").await?;
+//! let table = ops.write(vec![batch]).await?;
+//! ````
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -561,14 +571,29 @@ mod tests {
     use crate::writer::test_utils::datafusion::get_data;
     use crate::writer::test_utils::{
         get_delta_schema, get_delta_schema_with_nested_struct, get_record_batch,
-        get_record_batch_with_nested_struct,
+        get_record_batch_with_nested_struct, setup_table_with_configuration, write_batch,
     };
+    use crate::DeltaConfigKey;
     use arrow::datatypes::Field;
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow_array::{Int32Array, StringArray, TimestampMicrosecondArray};
     use arrow_schema::{DataType, TimeUnit};
     use datafusion::{assert_batches_eq, assert_batches_sorted_eq};
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn test_write_when_delta_table_is_append_only() {
+        let table = setup_table_with_configuration(DeltaConfigKey::AppendOnly, Some("true")).await;
+        let batch = get_record_batch(None, false);
+        // Append
+        let table = write_batch(table, batch.clone()).await;
+        // Overwrite
+        let _err = DeltaOps(table)
+            .write(vec![batch])
+            .with_save_mode(SaveMode::Overwrite)
+            .await
+            .expect_err("Remove action is included when Delta table is append-only. Should error");
+    }
 
     #[tokio::test]
     async fn test_create_write() {

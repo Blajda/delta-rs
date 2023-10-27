@@ -388,7 +388,7 @@ pub(crate) fn logical_schema(
 }
 
 #[derive(Debug, Clone, Default)]
-/// Used to specify it additonal metadat columns are exposed to the user
+/// Used to specify if additonal metadata columns are exposed to the user
 pub struct DeltaScanConfigBuilder {
     /// Include the source path for each record. The name of this column is determine by `file_column_name`
     include_file_column: bool,
@@ -406,7 +406,7 @@ impl DeltaScanConfigBuilder {
     }
 
     /// Indicate that a column containing a records file path is included.
-    /// Column name is randomly generated and can be determined once this Config is built
+    /// Column name is generated and can be determined once this Config is built
     pub fn with_file_column(mut self, include: bool) -> Self {
         self.include_file_column = include;
         self.file_column_name = None;
@@ -615,18 +615,15 @@ impl<'a> DeltaScanBuilder<'a> {
                 .collect::<Vec<arrow::datatypes::FieldRef>>(),
         ));
 
-        dbg!("{:?}", &schema);
-
         let mut table_partition_cols = table_partition_cols
             .iter()
-            .map(|c| Ok(schema.field_with_name(c)?.to_owned()))
+            .map(|c| Ok((c.to_owned(), schema.field_with_name(c)?.data_type().clone())))
             .collect::<Result<Vec<_>, ArrowError>>()?;
 
         if let Some(file_column_name) = &config.file_column_name {
-            table_partition_cols.push(Field::new(
+            table_partition_cols.push((
                 file_column_name.clone(),
                 wrap_partition_type_in_dict(DataType::Utf8),
-                false
             ));
         }
 
@@ -647,8 +644,6 @@ impl<'a> DeltaScanBuilder<'a> {
                 logical_filter.as_ref(),
             )
             .await?;
-
-        dbg!("{:?}", scan.schema());
 
         Ok(DeltaScan {
             table_uri: ensure_table_uri(self.object_store.root_uri())?
