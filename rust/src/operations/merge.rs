@@ -1161,9 +1161,10 @@ mod tests {
         let table = setup_table_with_configuration(DeltaConfigKey::AppendOnly, Some("true")).await;
         // append some data
         let table = write_data(table, &schema).await;
+        let (_, source) = setup().await;
         // merge
         let _err = DeltaOps(table)
-            .merge(merge_source(schema), col("target.id").eq(col("source.id")))
+            .merge(source, col("target.id").eq(col("source.id")))
             .with_source_alias("source")
             .with_target_alias("target")
             .await

@@ -108,7 +108,7 @@ impl ExecutionPlan for MetricObserverExec {
         }))
     }
 
-    fn statistics(&self) -> datafusion_common::Statistics {
+    fn statistics(&self) -> DataFusionResult<datafusion_common::Statistics> {
         self.parent.statistics()
     }
 
