@@ -44,7 +44,9 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::{
-    delta_datafusion::{expr::fmt_expr_to_sql, find_files, register_store, DeltaScanBuilder},
+    delta_datafusion::{
+        expr::fmt_expr_to_sql, find_files, register_store, DeltaScanBuilder, DeltaSessionContext,
+    },
     protocol::{Action, DeltaOperation, Remove},
     storage::{DeltaObjectStore, ObjectStoreRef},
     table::state::DeltaTableState,
@@ -428,7 +430,7 @@ impl std::future::IntoFuture for UpdateBuilder {
 
         Box::pin(async move {
             let state = this.state.unwrap_or_else(|| {
-                let session = SessionContext::new();
+                let session: SessionContext = DeltaSessionContext::default().into();
 
                 // If a user provides their own their DF state then they must register the store themselves
                 register_store(this.object_store.clone(), session.runtime_env());

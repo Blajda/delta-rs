@@ -66,7 +66,7 @@ use serde_json::{Map, Value};
 use super::datafusion_utils::{into_expr, maybe_into_expr, Expression};
 use super::transaction::commit;
 use crate::delta_datafusion::expr::{fmt_expr_to_sql, parse_predicate_expression};
-use crate::delta_datafusion::{register_store, DeltaScanBuilder};
+use crate::delta_datafusion::{register_store, DeltaScanBuilder, DeltaSessionContext};
 use crate::operations::datafusion_utils::MetricObserverExec;
 use crate::{
     operations::write::write_execution_plan,
@@ -1209,7 +1209,7 @@ impl std::future::IntoFuture for MergeBuilder {
 
         Box::pin(async move {
             let state = this.state.unwrap_or_else(|| {
-                let session = SessionContext::new();
+                let session: SessionContext = DeltaSessionContext::default().into();
 
                 // If a user provides their own their DF state then they must register the store themselves
                 register_store(this.object_store.clone(), session.runtime_env());

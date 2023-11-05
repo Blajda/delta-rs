@@ -35,7 +35,7 @@ use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
 
-use crate::delta_datafusion::{find_files, register_store, DeltaScanBuilder};
+use crate::delta_datafusion::{find_files, register_store, DeltaScanBuilder, DeltaSessionContext};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::operations::transaction::commit;
 use crate::operations::write::write_execution_plan;
@@ -273,7 +273,7 @@ impl std::future::IntoFuture for DeleteBuilder {
 
         Box::pin(async move {
             let state = this.state.unwrap_or_else(|| {
-                let session = SessionContext::new();
+                let session: SessionContext = DeltaSessionContext::default().into();
 
                 // If a user provides their own their DF state then they must register the store themselves
                 register_store(this.store.clone(), session.runtime_env());

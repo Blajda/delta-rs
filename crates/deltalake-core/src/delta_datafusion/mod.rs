@@ -55,6 +55,7 @@ use datafusion::physical_plan::{
     ColumnStatistics, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning,
     SendableRecordBatchStream, Statistics,
 };
+use datafusion::prelude::SessionConfig;
 use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor, VisitRecursion};
 use datafusion_common::{Column, DataFusionError, Result as DataFusionResult, ToDFSchema};
@@ -65,6 +66,7 @@ use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
 use datafusion_proto::logical_plan::LogicalExtensionCodec;
 use datafusion_proto::physical_plan::PhysicalExtensionCodec;
+use datafusion_sql::planner::ParserOptions;
 use object_store::ObjectMeta;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -1625,6 +1627,67 @@ pub async fn find_files<'a>(
     }
 }
 
+/// A wrapper for sql_parser's ParserOptions to capture sane default table defaults
+pub struct DeltaParserOptions {
+    inner: ParserOptions,
+}
+
+impl Default for DeltaParserOptions {
+    fn default() -> Self {
+        DeltaParserOptions {
+            inner: ParserOptions {
+                enable_ident_normalization: false,
+                ..ParserOptions::default()
+            },
+        }
+    }
+}
+
+impl Into<ParserOptions> for DeltaParserOptions {
+    fn into(self) -> ParserOptions {
+        self.inner
+    }
+}
+
+/// A wrapper for Deltafusion's SessionConfig to capture sane default table defaults
+pub struct DeltaSessionConfig {
+    inner: SessionConfig,
+}
+
+impl Default for DeltaSessionConfig {
+    fn default() -> Self {
+        DeltaSessionConfig {
+            inner: SessionConfig::default()
+                .set_bool("datafusion.sql_parser.enable_ident_normalization", false),
+        }
+    }
+}
+
+impl Into<SessionConfig> for DeltaSessionConfig {
+    fn into(self) -> SessionConfig {
+        return self.inner;
+    }
+}
+
+/// A wrapper for Deltafusion's SessionContext to capture sane default table defaults
+pub struct DeltaSessionContext {
+    inner: SessionContext,
+}
+
+impl Default for DeltaSessionContext {
+    fn default() -> Self {
+        DeltaSessionContext {
+            inner: SessionContext::new_with_config(DeltaSessionConfig::default().into()),
+        }
+    }
+}
+
+impl Into<SessionContext> for DeltaSessionContext {
+    fn into(self) -> SessionContext {
+        return self.inner;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::writer::test_utils::get_delta_schema;
@@ -1999,5 +2062,77 @@ mod tests {
             "+-------+------------+----+",
         ];
         assert_batches_sorted_eq!(&expected, &actual);
+    }
+
+    #[tokio::test]
+    async fn delta_scan_case_sensitive() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("moDified", DataType::Utf8, true),
+            Field::new("ID", DataType::Utf8, true),
+            Field::new("vaLue", DataType::Int32, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec![
+                    "2021-02-01",
+                    "2021-02-01",
+                    "2021-02-02",
+                    "2021-02-02",
+                ])),
+                Arc::new(arrow::array::StringArray::from(vec!["A", "B", "C", "D"])),
+                Arc::new(arrow::array::Int32Array::from(vec![1, 10, 20, 100])),
+            ],
+        )
+        .unwrap();
+        // write some data
+        let table = crate::DeltaOps::new_in_memory()
+            .write(vec![batch.clone()])
+            .with_save_mode(crate::protocol::SaveMode::Append)
+            .await
+            .unwrap();
+
+        let config = DeltaScanConfigBuilder::new().build(&table.state).unwrap();
+
+        let provider = DeltaTableProvider::try_new(table.state, table.storage, config).unwrap();
+        let ctx: SessionContext = DeltaSessionContext::default().into();
+        ctx.register_table("test", Arc::new(provider)).unwrap();
+
+        let df = ctx
+            .sql("select ID, moDified, vaLue from test")
+            .await
+            .unwrap();
+        let actual = df.collect().await.unwrap();
+        let expected = vec![
+            "+----+------------+-------+",
+            "| ID | moDified   | vaLue |",
+            "+----+------------+-------+",
+            "| A  | 2021-02-01 | 1     |",
+            "| B  | 2021-02-01 | 10    |",
+            "| C  | 2021-02-02 | 20    |",
+            "| D  | 2021-02-02 | 100   |",
+            "+----+------------+-------+",
+        ];
+        assert_batches_sorted_eq!(&expected, &actual);
+
+        let df = ctx
+            .table("test")
+            .await
+            .unwrap()
+            .select(vec![col("ID"), col("moDified"), col("vaLue")])
+            .unwrap();
+        let actual = df.collect().await.unwrap();
+        assert_batches_sorted_eq!(&expected, &actual);
+
+        let df = ctx.sql("select id from test").await;
+        assert!(df.is_err());
+
+        let df =
+            ctx.table("test")
+                .await
+                .unwrap()
+                .select(vec![col("id"), col("moDified"), col("vaLue")]);
+        assert!(df.is_err());
     }
 }
