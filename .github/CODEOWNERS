@@ -1,5 +1,4 @@
-crates/ @wjones127 @roeap @rtyler
-delta-inspect/ @wjones127 @rtyler
+rust/ @wjones127 @roeap @rtyler
 proofs/ @houqp
 python/ @wjones127 @fvaleye @roeap
 tlaplus/ @houqp

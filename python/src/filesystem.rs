@@ -51,8 +51,7 @@ impl DeltaFileSystemHandler {
         let storage = DeltaTableBuilder::from_uri(table_uri)
             .with_storage_options(options.clone().unwrap_or_default())
             .build_storage()
-            .map_err(PythonError::from)?
-            .object_store();
+            .map_err(PythonError::from)?;
         Ok(Self {
             inner: storage,
             rt: Arc::new(rt()?),
